@@ -1503,7 +1503,7 @@ impl ArmProbe for StLinkMemoryInterface<'_> {
     ) -> Result<(), ProbeRsError> {
         self.probe.select_ap(ap)?;
 
-        // Read needs to be chunked into chunks with appropiate max length (see STLINK_MAX_READ_LEN).
+        // Read needs to be chunked into chunks with appropriate max length (see STLINK_MAX_READ_LEN).
         for (index, chunk) in data.chunks_mut(STLINK_MAX_READ_LEN / 4).enumerate() {
             let mut buff = vec![0u8; 4 * chunk.len()];
 
@@ -1524,23 +1524,28 @@ impl ArmProbe for StLinkMemoryInterface<'_> {
     fn read_8(&mut self, ap: MemoryAp, address: u32, data: &mut [u8]) -> Result<(), ProbeRsError> {
         self.probe.select_ap(ap)?;
 
-        // Read needs to be chunked into chunks of appropriate max length of the probe
-        let chunk_size = if self.probe.probe.hw_version < 3 {
-            64
-        } else {
-            // This 128 byte chunk was set as the maximum possible amount is 255 even though it should
-            // support 512 bytes in theory. Thus we chose a smaller amount to avoid more possible bugs
-            // by not pushing the limit.
-            // See code of `read_mem_8bit` for more info.
-            128
-        };
+        // Read needs to be chunked into chunks with appropriate max length (see
+        // STLINK_MAX_READ_LEN). Our maximum chunk length needs to be slightly
+        // smaller since we may read an extra byte or two in order to ensure we
+        // do an aligned read.
+        const MAX_CHUNK_LEN: usize = STLINK_MAX_READ_LEN - 8;
+        for (index, chunk) in data.chunks_mut(MAX_CHUNK_LEN).enumerate() {
+            // Suppose we're reading 2 bytes starting at address 15. We need to
+            // read all 32 bit words that overlap those bytes. 15 % 4 == 3. So
+            // we'll start our read at 15 - 3 = 12. We'll then read 2 + 3 + 3 =
+            // 8, rounded down to a multiple of 4 bytes.
+            let address_offset = (address % 4) as usize;
+            let mut buff = vec![0u8; (chunk.len() + address_offset + 3) / 4 * 4];
 
-        for (index, chunk) in data.chunks_mut(chunk_size).enumerate() {
-            chunk.copy_from_slice(&self.probe.probe.read_mem_8bit(
-                address + (index * chunk_size) as u32,
-                chunk.len() as u16,
+            // We use read_mem_32bit rather than read_mem_8bit because it is
+            // significantly faster and has a much larger maximum read size.
+            self.probe.probe.read_mem_32bit(
+                address + (index * MAX_CHUNK_LEN) as u32 - address_offset as u32,
+                &mut buff,
                 ap.port_number(),
-            )?);
+            )?;
+
+            chunk.copy_from_slice(&buff[address_offset..address_offset + chunk.len()]);
         }
 
         Ok(())
